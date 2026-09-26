@@ -19,12 +19,13 @@
  *   deathInYear: number[] // deathInYear[k] = _k p_x * q_{x+k}，长度 = qx.length
  * }}
  */
-// 递推工作数组：生命表最长 121 岁，按需增长后复用，省去每次请求重新分配
-const kp = [];
-const deathInYear = [];
-
+// 并发隔离：kp / deathInYear 必须在每次调用的栈帧内新建并随返回值带走，
+// 绝不能挂在模块级复用——本次表比上一次短时，复用数组会残留上一次长表的
+// 尾部旧值，而下游按数组实际长度遍历，等于把陈旧的生存/死亡概率也算进来。
 export function survivalProbabilities(qx) {
   const years = qx.length;
+  const kp = new Array(years);
+  const deathInYear = new Array(years);
 
   let survived = 1; // _0 p_x = 1
   for (let k = 0; k < years; k++) {

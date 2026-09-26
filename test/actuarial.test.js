@@ -132,3 +132,73 @@ test('所有死亡率序列求和不超过 1（概率质量合理）', () => {
   const total = deathInYear.reduce((a, b) => a + b, 0);
   assert.ok(Math.abs(total - 1) < EPS);
 });
+
+// 回归：survival 递推不得复用模块级工作数组，否则上一张更长的表会在
+// 短表尾部残留旧值（终身寿险现值会超过 1、恒等式不再闭合）。
+const SHORT = { startAge: 60, qx: [0.1, 0.2, 1], interestRate: 0.05 };
+const LONGER = {
+  startAge: 40,
+  qx: [0.01, 0.02, 0.03, 0.05, 0.1, 0.2, 1],
+  interestRate: 0.05,
+};
+
+test('短表在长表之后复算：结果与首次完全一致，恒等式闭合（回归）', () => {
+  const first = valueLifeTable(SHORT);
+  assert.ok(Math.abs(first.wholeLifeInsurance - 0.880466472303207) < EPS);
+  assert.ok(Math.abs(first.annuityDue - 2.5102040816326534) < EPS);
+  assert.equal(first.identityClosed, true);
+
+  // 中间插入更长的表，再把短表原样交一遍
+  valueLifeTable(LONGER);
+  const again = valueLifeTable(SHORT);
+  assert.equal(again.wholeLifeInsurance, first.wholeLifeInsurance);
+  assert.equal(again.annuityDue, first.annuityDue);
+  assert.equal(again.identityClosed, true);
+  assert.ok(Math.abs(again.identityResidual) < EPS);
+  // 正利率下终身寿险现值不可能超过 1
+  assert.ok(again.wholeLifeInsurance < 1);
+});
+
+test('各种长度的表轮流提交：每份结果只由本次入参决定（回归）', () => {
+  const mkTable = (len) => {
+    const qx = Array.from({ length: len }, (_, k) =>
+      k === len - 1 ? 1 : 0.02 * (k + 1),
+    );
+    return { qx, interestRate: 0.03 + 0.01 * (len % 5) };
+  };
+  const lengths = [3, 9, 2, 7, 4, 8, 5, 6, 3, 9, 2];
+  // 基准：每个长度先在未被同长度以上调用干扰的顺序下取一次期望值
+  const baseline = new Map();
+  for (const len of [...new Set(lengths)]) {
+    baseline.set(len, valueLifeTable(mkTable(len)));
+  }
+  // 按「先长后短」最容易暴露残留尾巴的顺序轮流提交
+  for (const len of lengths) {
+    valueLifeTable(mkTable(len + 2 <= 11 ? len + 2 : 11)); // 先插一张更长的
+    const r = valueLifeTable(mkTable(len));
+    const b = baseline.get(len);
+    assert.equal(r.wholeLifeInsurance, b.wholeLifeInsurance, `长度 ${len} 寿险串写`);
+    assert.equal(r.annuityDue, b.annuityDue, `长度 ${len} 年金串写`);
+    assert.equal(r.identityClosed, true);
+  }
+});
+
+test('survival 递推结果数组长度严格等于本次表长，且不残留尾部旧值（回归）', () => {
+  survivalProbabilities(LONGER.qx); // 先写一张 7 岁长表
+  const s = survivalProbabilities(SHORT.qx); // 再来 3 岁短表
+  assert.equal(s.kp.length, 3);
+  assert.equal(s.deathInYear.length, 3);
+});
+
+test('两全保到终龄：被长表插过后纯生存仍为 0、净保费等于终身寿险现值（回归）', () => {
+  valueLifeTable(LONGER);
+  const e = valueEndowment({
+    ...SHORT,
+    years: SHORT.qx.length,
+    sumInsured: 1000,
+  });
+  assert.equal(e.perUnit.pureEndowment, 0);
+  assert.equal(e.money.pureEndowment, 0);
+  assert.ok(Math.abs(e.money.netPremium - 880.466472303207) < EPS);
+  assert.ok(Math.abs(e.money.termInsurance - 880.466472303207) < EPS);
+});

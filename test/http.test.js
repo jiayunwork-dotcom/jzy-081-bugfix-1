@@ -186,6 +186,136 @@ test('并发核算：不同生命表与利率的请求互不串写', withApp(asy
   });
 }));
 
+test('长短表顺序复现：短表→长表→短表，第二次短表必须与首次逐项一致（回归）', withApp(async (app) => {
+  const short = {
+    startAge: 60,
+    mortalityRates: [0.1, 0.2, 1],
+    interestRate: 0.05,
+  };
+  const longer = {
+    startAge: 40,
+    mortalityRates: [0.01, 0.02, 0.03, 0.05, 0.1, 0.2, 1],
+    interestRate: 0.05,
+  };
+
+  const post = (url, payload) =>
+    app.inject({ method: 'POST', url, payload }).then((r) => r.json());
+
+  const first = await post('/api/v1/life-table', short);
+  assert.ok(Math.abs(first.wholeLifeInsuranceAPV - 0.880466472303207) < EPS);
+  assert.ok(Math.abs(first.annuityDueAPV - 2.5102040816326534) < EPS);
+  assert.equal(first.identity.closed, true);
+
+  await post('/api/v1/life-table', longer);
+
+  const again = await post('/api/v1/life-table', short);
+  assert.deepEqual(again, first);
+
+  // 两全保到终龄：纯生存必须为 0、净保费 = 880.466...
+  await post('/api/v1/life-table', longer);
+  const endowment = await post('/api/v1/endowment', {
+    ...short,
+    years: 3,
+    sumInsured: 1000,
+  });
+  assert.equal(endowment.money.pureEndowment, 0);
+  assert.ok(
+    Math.abs(endowment.money.endowmentNetPremium - 880.466472303207) < EPS,
+  );
+}));
+
+// 构造长度各异的一批合法表（终龄 q=1）
+function mixedPayloads() {
+  const payloads = [];
+  for (let len = 3; len <= 9; len++) {
+    const mortalityRates = Array.from({ length: len }, (_, k) =>
+      k === len - 1 ? 1 : 0.01 * (k + 1),
+    );
+    // 同一 app 内并发：life-table 与 endowment 两个口子都覆盖
+    payloads.push({
+      url: '/api/v1/life-table',
+      body: { startAge: 60, mortalityRates, interestRate: 0.05 },
+    });
+    payloads.push({
+      url: '/api/v1/endowment',
+      body: {
+        startAge: 60,
+        mortalityRates,
+        interestRate: 0.05,
+        years: len,
+        sumInsured: 1000,
+      },
+    });
+  }
+  // 打乱顺序，让长短表在并发中交错
+  for (let k = payloads.length - 1; k > 0; k--) {
+    const j = (k * 7 + 3) % (k + 1);
+    [payloads[k], payloads[j]] = [payloads[j], payloads[k]];
+  }
+  return payloads;
+}
+
+// 在一个全新的 Node 子进程里起服务、只处理这一个请求，得到「全新启动单独
+// 核算」的干净基准（独立进程连模块缓存都不与主测试进程共享）。
+import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
+
+const FRESH_INJECT = join(
+  dirname(fileURLToPath(import.meta.url)),
+  'support',
+  'fresh-inject.mjs',
+);
+
+function freshResponse(url, body) {
+  const out = execFileSync(
+    process.execPath,
+    [FRESH_INJECT, url, JSON.stringify(body)],
+    { encoding: 'utf8' },
+  );
+  const { statusCode, body: rawBody } = JSON.parse(out);
+  assert.equal(statusCode, 200, rawBody);
+  return JSON.parse(rawBody);
+}
+
+// 每种入参只起一次全新进程取基准，多轮复用时共享
+const baselineCache = new Map();
+function baselineResponse(url, body) {
+  const key = `${url}|${JSON.stringify(body)}`;
+  if (!baselineCache.has(key)) {
+    baselineCache.set(key, freshResponse(url, body));
+  }
+  return baselineCache.get(key);
+}
+
+test('不同长度的表混在一起并发提交：每份结果与全新服务单独核算逐项对上（回归）', withApp(async (app) => {
+  const payloads = mixedPayloads();
+
+  // 同一 app 同时灌入所有请求（长表与短表交错）
+  const responses = await Promise.all(
+    payloads.map(({ url, body }) => app.inject({ method: 'POST', url, payload: body })),
+  );
+
+  // 每份响应都与「只处理过这一个请求的全新服务进程」结果逐项严格相等
+  for (let k = 0; k < payloads.length; k++) {
+    assert.equal(responses[k].statusCode, 200, responses[k].body);
+    const expected = baselineResponse(payloads[k].url, payloads[k].body);
+    assert.deepEqual(responses[k].json(), expected);
+  }
+}));
+
+test('长短表串行多轮交错：每轮结果与全新服务基准一致（回归）', withApp(async (app) => {
+  const payloads = mixedPayloads();
+  for (let round = 0; round < 3; round++) {
+    for (const { url, body } of payloads) {
+      const res = await app.inject({ method: 'POST', url, payload: body });
+      assert.equal(res.statusCode, 200, res.body);
+      const expected = baselineResponse(url, body);
+      assert.deepEqual(res.json(), expected);
+    }
+  }
+}));
+
 test('真实 HTTP 监听也能正常服务（listen + fetch）', async () => {
   const app = buildApp();
   try {
