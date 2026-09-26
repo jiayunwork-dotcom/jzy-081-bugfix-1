@@ -1,0 +1,17 @@
+{
+  "name": "life-table-apv-service",
+  "version": "1.0.0",
+  "description": "离散生命表寿险精算现值（APV）常驻计算服务：终身寿险 / 期初生存年金 / 定期与两全净保费",
+  "type": "module",
+  "main": "src/server.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test test/"
+  },
+  "dependencies": {
+    "fastify": "^5.12.5"
+  }
+}
