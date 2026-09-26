@@ -19,12 +19,13 @@
  *   deathInYear: number[] // deathInYear[k] = _k p_x * q_{x+k}，长度 = qx.length
  * }}
  */
-// 递推工作数组：生命表最长 121 岁，按需增长后复用，省去每次请求重新分配
-const kp = [];
-const deathInYear = [];
-
 export function survivalProbabilities(qx) {
   const years = qx.length;
+
+  // 递推工作数组每次调用新建：结果只属于本次请求，
+  // 不携带、也不泄漏任何历史请求的中间量（并发隔离契约见 valuation.js）
+  const kp = new Array(years);
+  const deathInYear = new Array(years);
 
   let survived = 1; // _0 p_x = 1
   for (let k = 0; k < years; k++) {
